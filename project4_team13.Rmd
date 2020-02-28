@@ -1,0 +1,591 @@
+---
+title: "Performance of L2 Penalized Logistic Regression on Predicting the Success of Bank Telemarketing"
+output:
+  pdf_document: 
+    df_print: paged
+    number_sections: yes
+header-includes:
+  - \usepackage{subfig}
+---
+
+
+<style type="text/css">
+
+
+Headers{/* Normal  */ font-size: 20pt;
+}
+
+body{ /* Normal  */
+      font-size: 18px;
+  }
+
+</style>
+
+```{r , include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,message=FALSE,warning=FALSE)
+options(width = 120)
+```
+
+
+```{r, include=FALSE}
+library(Matrix)
+library(foreach)
+library(glmnet)
+library(knitr)
+library(pROC)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(car)
+library(gridExtra)
+library(grid)
+library(kableExtra)
+```
+
+# Introduction
+
+The project mainly focuses on a classification that helps the Portuguese retail bank to predict if a client would subscribe to a bank term deposit. We apply two different models; one is a logistic regression model, and another is a random forest tree model since we have a binary dependent variable. To better predict and classify the subscription condition, we are going to compare the performances of two different models and explain the differences in the performances. The data we use called bank-additional-full, which collected of 45211 client’s information along with the subscription condition, ordered by date with 16 output retributes. The reduced dataset only contains 10% examples from the full data selected randomly. Thus, avoiding miss any vital information, we decided to use the full data. The data don’t have any missing value.
+
+# Descriptive Analysis 
+```{r}
+setwd(getwd())
+data<-read.csv('./bank-additional-full.csv',sep = ';')
+#sum(is.na(data)) #no missing data
+#sapply(data, class) # type of data
+
+#undersampling
+set.seed(1234)
+#table(data$y)
+data_under<-downSample(data,factor(data$y))
+colnames(data_under)[21] <- "y"
+#table(data_under$y)
+
+#convert into dummy
+bank.f<-data_under
+data_copy=cbind(bank.f[,1:ncol(bank.f)-1],y=ifelse(bank.f$y=="yes", 1, 0)) #y=1,yes; y=0,no
+dummies <- dummyVars(y ~ ., data = data_copy,fullRank = TRUE)
+bank.f.d <-as.data.frame(cbind(predict(dummies,newdata=data_copy),y=data_copy$y))
+#drops <- c("loan.unknown")
+#bank.f.d<-bank.f.d[,!(names(bank.f.d) %in% drops)]
+
+#split data
+set.seed(1234)
+n.f=nrow(bank.f)
+index.f=sample(1: n.f, size=n.f/5, replace=FALSE) #randomly sample 80% cases
+bank.v=bank.f[index.f,]  ## validation data set 
+bank.t=bank.f[-index.f,] ## training data set
+
+#convert into dummies
+#data_copy=cbind(bank.f[,1:ncol(bank.f)-1],y=ifelse(bank.f$y=="yes", 1, 0)) #y=1,yes; y=0,no
+#dummies <- dummyVars(y ~ ., data = data_copy,fullRank = TRUE)
+#bank.f.d <-as.data.frame(cbind(predict(dummies,newdata=data_copy),y=data_copy$y))
+#bank.f.d$y<-as.factor(bank.f.d$y)
+bank.v.d <-bank.f.d[index.f,] ## validation data set with dummies
+bank.t.d <-bank.f.d[-index.f,] ## training data set with dummies
+```
+
+```{r}
+#type of variables
+#table(sapply(bank.f,class))
+categrl_list = names(bank.f)[sapply(bank.f,class)=='factor'] #names of categorical variables
+contins_list = names(bank.f)[sapply(bank.f,class)!='factor'] #names of continous variables
+
+```
+
+* \textit{\textbf{Unbalance Data}} Figure 1(a) shows that dataset "bank-additional-full" is unbalanced, as only 4640 records(11.26%) are related to 'yes', which means the client subscribed a term deposit. This unequal records for different classes need to be addressed since most machine learning classification algorithms are sensitive to unbalance in the predictor classes. An unbalanced dataset will bias the prediction model towards the more common class. Since we will use Random Forest Classification in the latter part, we'd like to deal with this imbalance from the beginning. The approach we adopt is under-sampling, where we randomly select a subset of samples from the class with more records('no') to match the number of records coming from less common class('yes').  We used the `downSample` function in the `caret` package, so that we have a new dataset of 9280 records in total, with the same number of records for both classes.  
+We applied under-sampling out of two reasons: first, even after disregarding a large number of records, we still had plenty of data that gave sufficient information; second, by decreasing the number of records, the learning time was also decreased. One major disadvantage, which is obvious, is that undersampling discards are potentially useful data. After under-sampling, we check the levels of categorical variables, which indicates that all levels in the full dataset were included in the under-sampling dataset.
+
+```{r}
+drops <- c("loan.unknown")
+bank.f.d.d<-bank.f.d[,!(names(bank.f.d) %in% drops)]
+bank.t.d.d <-bank.f.d.d[-index.f,] ## training data set with dummies
+vif = vif(glm(y~.,data=bank.t.d.d,family=binomial))
+#kable(vif[vif>5])
+```
+
+```{r,fig.height=5,fig.cap='(a)Number of Records in bank-additional-full    (b)List of Variables with VIF>5', fig.subcap= c('', ''), out.width = '.49\\linewidth', echo = F, fig.align='center',fig.pos='H'}
+
+theme_update(plot.title = element_text(hjust = 0.5,size =24,face='bold'),axis.text=element_text(size = 20),axis.title=element_text(size=20))
+ggplot(data,aes(x=y))+
+  geom_bar()+
+  labs(title='Number of Records')
+
+grid.newpage()
+grid.table(data.frame(Variables=names(vif[vif>5]),VIF=round(vif[vif>5],digits=2)), rows = NULL)
+```
+
+* \textit{\textbf{Add Dummy Variables}} The dataset has 20 predictor variables, and 10 of them are categorical variables. For the convenience of L2 penalized logistic regression in the later section, we transformed the initial dataset by adding dummy variables. After transformation, we have 53 variables in total. A detailed explanation could be found in the Appendix. 
+* \textit{\textbf{Split into Training/Testing Data}}  Our full dataset had a total of 9280 records, and we adopt 80/20 rule, which gave us 7424 training records and 1856 testing records.
+* \textit{\textbf{Multicollinearity}}  One assumption in logistic regression model is there should be no high multicollinearity among the predictors. To quantify multicollinearity, we used `vif{car}` to calculated the variance inflation factor(VIF). One particular fact we noticed is that, two of the dummy variables, housing.unkown and loan.unkown, are linearly dependent: when housing.unkown is 'unknown', so is the loan.unkown. Thus to avoid aliased coefficients in the model, we dropped one column, in this case, loan.unknown. Figure 1(b) shows the list of variables whose VIF is larger than 5 when modeling with logistic regression. In practice, $max_{k}$ $VIF_{k}>10$ is often taken as an indication that multicollinearity is high. In this case, the maximum value is 144.04, which is much larger than 10. We will adjust for this high multicollinearity in the modeling part.
+
+
+```{r}
+#type of variables
+categrl_list = names(bank.f)[sapply(bank.f,class)=='factor'] #names of categorical variables
+contins_list = names(bank.f)[sapply(bank.f,class)!='factor'] #names of continous variables
+```
+
+# Analysis
+## Logistic Regression
+
+ This project is a case-control study, and we focus on a classification problem. Under this circumstance, logistic regression is a choice because the calculated sample odds ratio performs well as an estimator of the population odds ratio for moderate and large samples. Thus, We use logistic regression to model the conditional probability $Pr(Y=1|\mathbf{X}=\mathbf{x}) = E[Y|\mathbf{X}=\mathbf{x}]$ as a function of the predictors and use maximum likelihood estimation to estimate unknown parameters in the function. In the data analysis section, we found some variables correlate with each other, so we try to build the L2 penalized logistic model for solving this problem. Then, we will do a sensitivity analysis and evaluate the performance of the model.
+
+### L2 Penalized Logistic Regression
+$${\displaystyle logit(\pi_i)=\beta _{0}+\beta _{1}X_{1,i}+\beta _{2}X_{2,i}+\cdots+\beta_{53}X_{53,i}}$$
+\begin{align*}
+&\pi_i = Pr(Y=1|\mathbf{X}=\mathbf{x_i}) = E[Y|\mathbf{X}=\mathbf{x_i}]; \text{ logit(p) denotes logit function or the log-odds, which is defined as } \frac{p}{1-p}. \\
+&X_{k,i} \text{ denotes the value of the kth independent variable in the ith sample.} k=1,2,\cdots,53; i=1,2,...,7424.\\
+&\text{The explanation of }X_{k}, k = 1,2,\cdots,53 \text{ is shown in the Appendix 1.}\\
+&Y_{i} \text{ denotes whether the client has subscribed a term deposit.}\\
+&\text{If the client has subscribed a term deposit, } Y_{i} = 1. \text{ Otherwise, } Y_{i} = 0.\\
+&\beta_k \text{ denotes the coefficient of the kth predictor.}k=1,2,\cdots,53;\beta_0 \text{ denotes intercept.}\\
+&\text{Estimate the coeficients by maximum likelihood estimation: }\\&\hat{\boldsymbol{\beta}}= argmin_{\boldsymbol{\beta}} \left[ \frac{1}{7424} \left\lbrace -Y_i(\beta_0+\sum_{k=1}^{53}\beta_kX_{k,i})+log(1+exp(\beta_0+\sum_{k=1}^{53}\beta_kX_{k,i}))\right\rbrace+\lambda\sum_{k=1}^{53}\beta_k^2 \right]
+\end{align*}
+```{r}
+s<-sapply(names(bank.f), function(x) ifelse(length(levels(bank.f[[x]]))==0,1,length(levels(bank.f[[x]]))-1))
+l<-sapply(c(1:20),function(x) rep(x,s[x]))
+grp<-unlist(l, recursive = FALSE)
+```
+
+```{r}
+Y <- ifelse(bank.t.d$y==0,-1,1)
+X <- bank.t.d[,1:ncol(bank.t.d)-1]
+Y <- as.matrix(Y)
+X <- as.matrix(X)
+Y.t <- ifelse(bank.v.d$y==0,-1,1)
+model_la <- cv.glmnet(X,Y,alpha = 0,family = "binomial")
+model <- glmnet(X,Y,alpha = 0,family = "binomial",lambda = model_la$lambda.1se)
+coef <- coef(model)
+res.v <- predict(model_la,as.matrix(bank.v.d[,1:ncol(bank.t.d)-1]),type='response',s='lambda.1se',alpha=0)
+#summary(model_la)
+modelroc <- roc(Y.t,as.numeric(res.v))
+#class(res.v)
+#modelroc
+```
+
+
+### Model Assumptions for Logistic Regression
+
+* \textit{\textbf{Independence}} Observations to be independent of each other. This dataset is a case-control study and we randomly select a subset of samples from the class with more records('no'). It is reasonable to believe that this assumption holds.
+
+* \textit{\textbf{Binary outcome}} The response variable should be binary data. This assumption satisfied since our response variable is if the client subscribed to a term deposit, which is a binary data that includes "yes" and "no" two outcomes. This assumption satisfied since our response variable is if the client subscribed to a term deposit, which is a binary data that includes "yes" and "no" two outcomes.
+
+* \textit{\textbf{No influential values}} There should be no influential values like extreme values or outliers in the predictors
+
+* \textit{\textbf{No multicollinearity}} There should be no high multicollinearity among the predictors.
+
+We will test the influential values assumptions and multicollinearity assumptions in the Model Diagnostic section.
+
+### Model Fitting
+
+In this project, we consider all independent variables include 20 predictor variables. Among them, 10 are categorical variables. After transforming all categorical variables by adding dummy variables, we included 53 variables in the project. We use 'cv.glmnet' to choose $\lambda$ and estimate the coefficients. The estimated coefficients are listed in Appendix 1. The fitting results showed that the response variable was significantly affected by the variables of job, marital, education, housing loan, loan, contact communication type, duration, campaign, pdays, previous and outcome.
+
+```{r}
+data_train=bank.t.d
+logit_model <- glm(y~.,family=binomial(link=logit),data=data_train)
+Y <- ifelse(data_train$y==0,-1,1)
+X <- data_train[,1:ncol(data_train)-1]
+Y <- as.matrix(Y)
+X <- as.matrix(X)
+model_la <- cv.glmnet(X,Y,alpha = 0,family = "binomial")
+model_la$y <- data_train$y
+model_la$fitted.values <- predict(model_la,X,type='response',s='lambda.1se',alpha=0)
+model_la$residuals.D <-model_la$y -  model_la$fitted.values
+model_la$prior.weights <- rep(1,length(model_la$y))
+model_la$df.residuals <- length(model_la$y) - nrow(model_la$glmnet.fit$beta)
+model_la$family$variance <- logit_model$family$variance
+model_la$family$dev.resids <- logit_model$family$dev.resids
+model_la$residuals.P <- model_la$residuals*sqrt(model_la$prior.weights)/sqrt(model_la$family$variance(model_la$fitted.values))
+#summary(logit_model)
+
+```
+
+
+### Model Diagnostics
+
+* \textit{\textbf{No influential values}} Since we employ L2 penalized logistics model to do classification, there is no common way to detect influential observations. Even though L2 penalized logistics model is not very robust to outliers, we can not find an efficient way to detect influential outliers and deal with them. Thus, in this project, we just accept that there is no influential value.
+
+
+```{r,fig.height=4,fig.cap='Diagnostic plots. Left panel: Pearson residual vs Deviance residual. Right panel: Boxplot of Pearson residual and Devianc residual', echo = F, fig.align='center',fig.pos='H'}
+res.P = model_la$residuals.P
+res.D = model_la$residuals.D
+par(mfrow=c(1,2))
+#removeoutliers
+data_train <- bank.t.d
+lb <- quantile(res.P, 0.01)
+ub <- quantile(res.P, 0.99)
+data_train <- data_train[-which(res.P<lb | res.P >ub ),]
+
+#fit again
+logit_model <- glm(y~.,family=binomial(link=logit),data=data_train)
+Y <- ifelse(data_train$y==0,-1,1)
+X <- data_train[,1:ncol(data_train)-1]
+Y <- as.matrix(Y)
+X <- as.matrix(X)
+model_la <- cv.glmnet(X,Y,alpha = 0,family = "binomial")
+model_la$y <- data_train$y
+model_la$fitted.values <- predict(model_la,X,type='response',s='lambda.1se',alpha=0)
+model_la$residuals.D <-model_la$y -  model_la$fitted.values
+model_la$prior.weights <- rep(1,length(model_la$y))
+model_la$df.residuals <- length(model_la$y) - nrow(model_la$glmnet.fit$beta)
+model_la$family$variance <- logit_model$family$variance
+model_la$family$dev.resids <- logit_model$family$dev.resids
+model_la$residuals.P <- model_la$residuals*sqrt(model_la$prior.weights)/sqrt(model_la$family$variance(model_la$fitted.values))
+#summary(logit_model)
+
+res.P = model_la$residuals.P
+res.D = model_la$residuals.D
+plot(res.D,res.P)
+boxplot(cbind(res.P, res.D), labels = c("Pearson", "Deviance"))
+
+```
+
+* \textit{\textbf{No multicollinearity}} The variance inflation factor (VIF) is an indicator estimates how the variance of an estimated regression coefficient increase due to the collinearity. If the VIF value is larger than 10, it indicates a problematic amount of collinearity. In our analysis, We originally had six variable have VIF values greater than 10, but we used L2 penalized logistic regression which prevents problems arising due to collinearity.
+
+* \textit{\textbf{Goodnedd-of-fit}} The Deviance Residuals and Pearson Residuals plots suggest that if the two kinds of residuals are not entirely similar to each other, the model may suffer from potential lack-of-fit. The two kinds of residuals are quite similar to each other wich menas the model does not suffer from potential lack-of-fit. 
+
+### L2 Penalized Logistic Regression performance evaluation
+
+```{r,fig.height=5,fig.cap='L2 Penalized Logistic Regression performance evaluation', fig.subcap= c('AUC plot', 'Confusion Matrix'), out.width = '.49\\linewidth', echo = F, fig.align='center',fig.pos='H'}
+plot(modelroc,print.auc=TRUE,auc.polygon=TRUE,grid=c(0.1,0.2),
+     max.auc.polygon=TRUE,auc.polygon.col="skyblue",print.thres=TRUE)
+
+res.v.c<- predict(model_la,as.matrix(bank.v.d[,1:ncol(bank.t.d)-1]),type='class',s='lambda.1se',alpha=0)
+Ref <- factor(ifelse(Y.t==-1,'no','yes'))
+Prd <- factor(ifelse(res.v.c==-1,'no','yes'))
+
+grid.newpage()
+cm_d <- as.data.frame(confusionMatrix(Prd,Ref,positive='yes')$table)
+ggplot(cm_d, aes(x = Reference, y = Prediction, fill =Freq))+
+  geom_tile() +
+  geom_text(aes(label = paste("",Freq,""),color='red'))
+
+```
+
+To evaluate the performance of our L2 penalized logistic regression model, we use the Receiver Operating Characteristics (ROC) Area Under the Curve(AUC) curve as our visual indicator. ROC is a probability curve that bases on the ratio of the true-positive rate against the false-positive rate, and AUC represents the degree of separability under different threshold settings. It tells how confident the model could do the classification. The AUC value ranges from 0 to 1. Higher the AUC value, the better the model is at predicting. In the AUC plot, the AUC value is 0.927, which is close to 1. It means we have a 92.7% chance that the model will classify a client who subscribed to a term deposit as 'yes' and a client who didn't subscribe to a term deposit as 'no.'
+
+## Random Forests
+
+### Random Forests Model Built
+
+Random Forests is an ensemble learning algorithm. It was designed based on the decision trees, and it combines the predications of several base decision trees. The base decision trees are built independently; then, their predictions are averaged as the final prediction. The base decision trees are created as a diverse set of classifiers so that randomness is introduced during this construction. 
+
+In the random forest tree algorithm, we used two ways to add randomness. One is from the samples used for each tree; we drew data for each base tree with replacement from the input data. The other one is the features used to splitting each node; we used a random subset of features for splitting the node of each tree.
+
+We used the grid-search, ten-fold cross-validation method to tune the two parameters, one is the number of trees, and the other is the number of features randomly sampled as a candidate to split the node for each tree. The Fig \ref{fig:grid} shows the accuracy for each parameter; from it, we can see, when the number of trees is 25, and the number of features is around 16, the best accuracy can be obtained as 0.890.  
+
+The cross-validation accuracy is calculated upon the validation part, using the model trained with the training part. So it can reflect the algorithm's testing performance. We found 25 trees are the best, and we won't go beyond 30 trees since more trees mean more complex of the algorithm. The Random Forest does not increase generalization error when more trees are added to the model. But the model with full trees likely has lower train error but higher test error than the model with pruned trees.   
+
+While there are other hyperparameters that can affect the model, due to limited ability, we won't tune them. However, we do some reference search to report their relationship with the model; interested readers are welcome to test by themselves.  
+
+* \textit{\textbf{Pre-pruning Threshold}} This measures the threshold that a node will be split if this split induces a decrease of the impurity greater than or equal to this threshold value. This threshold is between (0.0-1.0); the bigger the value, the more aggressive pruning. Pruning in decision tree-based classification methods is very important. The goal is to iteratively split to minimize the "impurity" of the partitioned dataset, meaning a leaf node contains samples that all belong to one class, it is "pure" and thus has an impurity of 0. The ultimate goal of decision tree-based models is to split the tree such that each leaf node corresponds to the prediction of a single class, even if there is only one sample in that class. However, this can lead to the tree radically overfitting the data; it will grow in a manner such that it will create a leaf node for every sample if necessary. So the vital thing is about tree pruning. There are different pruning methods. In general, the training error immediately increased after pruning significantly from thousands of trees to less than 100, on the contrary, the test/cv error decreased, both of them keep falling until some nodes, then starts increased if pruning too much and leads to underfitting.
+
+* \textit{\textbf{Max depth}} Another feature to limit tree growth in some way is the max depth. The tree grown with a small max depth has a relatively high error rate since a tiny tree could be underfitting. Thus, it's essential to maintain a balance in tree size. However, trees with too many nodes overfit easily. 
+
+```{r, echo = FALSE, eval = TRUE}
+## not run
+
+tunegrid<-expand.grid(mtry = seq(from = 4, to = 20, by = 4))
+
+metric <- 'Accuracy'
+control <- trainControl(method = 'cv', number = 10, classProbs = TRUE, summaryFunction = multiClassSummary)
+
+modellist_final<-list()
+for (ntree in c(5, 10, 15, 20, 25, 30))
+{
+model_train <- train(y~., data = bank.t, method = "rf", tuneLength = 5, trControl = control, ntree=ntree, tuneGrid = tunegrid)
+# print(model_train)
+key <- toString(ntree)
+modellist_final[[key]] <-model_train
+}
+```
+ 
+```{r fig.height = 4, fig.cap = "grid search results\\label{fig:grid}", fig.align = "center",fig.pos='H'}
+# modellist_final <- readRDS(file = "modellist_final.rds")
+# plots <- list() 
+# for (i in c(1,2)) {
+# name <- sprintf("tree %s", c(5, 10)[i])
+# p <- plot(modellist[[i]], main=name)
+# key <- toString(i)
+# plots[[key]] <- p
+# }
+
+par(mfrow = c(2, 3))
+# multiplot(plotlist = plots, cols=2)
+
+model1 <- modellist_final[[1]]
+
+x <- model1[["results"]][["mtry"]]
+accuracy <- model1[["results"]][["Accuracy"]]
+plot(x, accuracy, main="tree: 5", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+
+model2 <- modellist_final[[2]]
+
+x <- model2[["results"]][["mtry"]]
+accuracy <- model2[["results"]][["Accuracy"]]
+plot(x, accuracy,main="tree: 10", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+
+model3 <- modellist_final[[3]]
+
+x <- model3[["results"]][["mtry"]]
+accuracy <- model3[["results"]][["Accuracy"]]
+plot(x, accuracy,main="tree: 15", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+
+model4 <- modellist_final[[4]]
+
+x <- model4[["results"]][["mtry"]]
+accuracy <- model4[["results"]][["Accuracy"]]
+plot(x, accuracy,main="tree: 20", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+
+model5 <- modellist_final[[5]]
+
+x <- model5[["results"]][["mtry"]]
+accuracy <- model5[["results"]][["Accuracy"]]
+plot(x, accuracy,main="tree: 25", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+
+model6 <- modellist_final[[6]]
+
+x <- model6[["results"]][["mtry"]]
+accuracy <- model6[["results"]][["Accuracy"]]
+plot(x, accuracy,main="tree: 30", xlab="#Randomly Selected Predictors", ylab="Accury (CV)", xlim = c(1,23))
+text(x, accuracy, round(accuracy,4), cex=0.6, pos=4, col="red")
+```
+
+
+### The learning curve, ROC, and confusion matrix
+
+Learning curves were plotted after setting a reasonable number of trees of 25, and the number of features sampled to split the node is 12 from the previous analysis. The train, test errors vs. various training examples are reflected in Fig \ref{fig:rf}. Here learning curves are used to evaluate the underfitting or overfitting of the overall algorithm. The training error starts from zero because a function can always be found that touches those number of points precisely. The training error starts increased as the training set gets larger, and the error value will plateau out after a particular training set size. On the contrary, the test errors start from high, which is because of the weak classifier trained from a small portion of instances, then slowly decreased. It showed that once the training size reached to a level, the error $error_{train}(\theta)$ and error $error_{test}(\theta)$ is close, this could indicate a bias of the algorithm. However, it may not be a high bias case since the $error_{test}(\theta)$ is still decreasing very slowly.
+
+```{r, echo = FALSE, eval = TRUE} 
+## not run
+## plot the learning curve
+
+# create empty data frame 
+learnCurve <- data.frame(m = integer(4),
+                     trainError = integer(4),
+                     cvError = integer(4))
+
+# test data response feature
+testY <- bank.v$y
+trainY <- bank.t$y
+# Run algorithms using 10-fold cross validation with 3 repeats
+trainControl <- trainControl(method="cv", summaryFunction = multiClassSummary, classProbs = TRUE)
+metric <- "Accuracy"
+
+proportion <- c(0.01, 0.1, 0.5, 1)
+tunegrid<-expand.grid(mtry = c(12))
+
+for_model <- 1:nrow(bank.t)
+n <- length(for_model)
+
+# loop over training examples
+for (i in seq(along = proportion)) {
+    learnCurve$m[i] <- i
+
+    # train learning algorithm with size 
+    in_mod <- if(proportion[i] < 1) sample(for_model, size = floor(n*proportion[i])) else for_model
+    learning_curve <- train(x = bank.t[in_mod, colnames(bank.t)!= "y", drop = FALSE], y = bank.t[in_mod, "y"], method="rf", metric=metric, trControl=trainControl, ntree=25, tuneGrid = tunegrid)   
+    
+    # prediction <- predict.train(learning_curve,
+    #                       newdata = bank.t[-21],
+    #                       type = "raw")
+    # conf.matrix.1 <- table(trainY, prediction)
+    # accuracy <- sum(diag(conf.matrix.1)) / sum(conf.matrix.1) 
+    # 
+    # learnCurve$trainError[i] <- 1-accuracy
+    
+    learnCurve$trainError[i] <- 1-learning_curve$results$Accuracy
+
+    # use trained parameters to predict on test data
+    prediction <- predict.train(learning_curve,
+                          newdata = bank.v[-21],
+                          type = "raw")
+  
+    conf.matrix.1 <- table(testY, prediction)
+    accuracy <- sum(diag(conf.matrix.1)) / sum(conf.matrix.1) 
+    learnCurve$cvError[i] <- 1-accuracy
+}
+```
+
+
+```{r}
+# plot learning curves of training set size vs. error measure
+# for training set and test set
+
+# trainError <- readRDS(file = "learnCurve$trainError.rds")
+# cvError <- readRDS(file = "learnCurve$cvError.rds")
+proportion <- c(0.01, 0.1, 0.5, 1)
+
+# plot(x=c(1,2,3,4), xaxt = "n", trainError,type = "o",col = "red", xlab = "Training set size",
+#           ylab = "Error Rate", main = "Random Forests Learning Curve", ylim = c(0.08,0.19))
+# lines(x=c(1,2,3,4), xaxt = "n", cvError, type = "o", col = "blue",ylim = c(0.08,0.19))
+# axis(1, at=1:4, labels= proportion)
+# legend('topright', c("Train error", "Test error"), lty = c(1,1), lwd = c(2.5, 2.5),
+#        col = c("red", "blue"))
+```
+
+
+
+```{r, echo = FALSE, eval = TRUE}
+## not run
+trainControl <- trainControl(method="cv", summaryFunction = multiClassSummary, classProbs = TRUE)
+metric <- "Accuracy"
+
+tunegrid<-expand.grid(mtry = c(12))
+
+model_rf <- train(y~., data = bank.t, method="rf", metric=metric, trControl=trainControl, ntree=25, tuneGrid = tunegrid)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# model_rf <- readRDS(file = "model_rf.rds")
+## plot roc curve
+
+rf_prediction <- predict(model_rf, bank.v[-21], type = "prob")
+rf_roc <- roc(bank.v$y, rf_prediction[,2])
+ROC_rf_auc <- auc(rf_roc)
+# plot(rf_roc, col = "green", main = "ROC For Random Forest (GREEN)")
+
+# p2.pryr %<a-% {
+# plot(rf_roc,print.auc=TRUE,auc.polygon=TRUE,grid=c(0.1,0.2),
+#      max.auc.polygon=TRUE,auc.polygon.col="skyblue",print.thres=TRUE, main="ROC For Random Forest")
+# }
+
+```
+
+We used our final model to predict the test data set. The ROC, AUC, and confusion matrix are shown in the below Fig 5. We can see the AUC is close to the AUC of the L2 penalized logistic model. 
+
+```{r}
+
+## plot confusion matrix
+pred_rf_raw <- predict.train(model_rf,
+                          newdata = bank.v[-21],
+                          type = "raw")
+
+table <- data.frame(confusionMatrix(pred_rf_raw, factor(bank.v$y),positive='yes')$table)
+conf.matrix.1 <- table(factor(bank.v$y), pred_rf_raw)
+final_accuracy <- sum(diag(conf.matrix.1)) / sum(conf.matrix.1) 
+
+plotTable <- table %>%
+  mutate(goodbad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+## plot confusion matrix
+p3 <- ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = Freq)) +
+geom_tile() +
+geom_text(aes(label = Freq, color='red'))
+
+
+```
+
+
+```{r , fig.height = 4,fig.width = 12,fig.cap = 'Performance Plot. Left panel: Random Forests Learning Curve. Middle panel:ROC, AUC.Right panel:', fig.pos='H'}
+library(grid)
+library(gridBase)
+
+# start new page
+plot.new() 
+
+# setup layout
+gl <- grid.layout(nrow=1, ncol=3)
+# grid.show.layout(gl)
+
+# setup viewports
+vp.1 <- viewport(layout.pos.col=1, layout.pos.row=1) 
+vp.2 <- viewport(layout.pos.col=2, layout.pos.row=1) 
+vp.3 <- viewport(layout.pos.col=3, layout.pos.row=1)
+# init layout
+pushViewport(viewport(layout=gl))
+# access the first position
+pushViewport(vp.1)
+
+# start new base graphics in first viewport
+par(new=TRUE, fig=gridFIG())
+
+plot(x=c(1,2,3,4), xaxt = "n", trainError,type = "o",col = "red", xlab = "Training set size, as percentage",
+          ylab = "Error Rate", ylim = c(0.08,0.19))
+lines(x=c(1,2,3,4), xaxt = "n", cvError, type = "o", col = "blue",ylim = c(0.08,0.19))
+axis(1, at=1:4, labels= proportion)
+legend('topright', c("Train error", "Test error"), lty = c(1,1), lwd = c(2.5, 2.5),
+       col = c("red", "blue"))
+
+# done with the first viewport
+popViewport()
+
+# move to the next viewport
+pushViewport(vp.2)
+
+# start new base graphics in first viewport
+par(new=TRUE, fig=gridFIG())
+
+
+plot(rf_roc,print.auc=TRUE,auc.polygon=TRUE,grid=c(0.1,0.2),
+     max.auc.polygon=TRUE,auc.polygon.col="skyblue",print.thres=TRUE)
+
+
+# done with the first viewport
+popViewport()
+
+# move to the next viewport
+pushViewport(vp.3)
+
+
+# print our ggplot graphics here
+print(p3, newpage = FALSE)
+
+# done with this viewport
+popViewport(1)
+
+```
+
+# Discussion
+## Under-sampling and Over-sampling
+Both under-sampling and over-sampling could deal with class imbalance. Apart from the reasons for choosing under-sampling given in the data processing section, we also consider the disadvantages and feasibility of using over-sampling. When over-sampling, we randomly duplicate samples from the class with fewer records. Even though this process avoids losing information, one major disadvantage is that we might overfit the model and overestimate the performance since we are more likely to have the same samples in training and testing data. Besides, over-sampling increases the size of the training dataset greatly and makes it more time consuming to implement learning algorithms. Compared with these disadvantages, losing partial information from under-sampling is more acceptable, thus lead to the decision of using under-sampling. 
+
+## Comparison Between L2 Penalized Logistic Regression and Random Forests
+In this project, we used two classification models, L2 Penalized Logistic Regression and Random Forests. Comparing the two models, L2 Penalized Logistic Regression has the advantage of fitting a model that tends to be easily understood by humans and less time consuming. When compared with logistic regression, Random Forests is more flexible as we have no probabilistic model, but just binary split. We might not need to make any assumption except sampling is representative and independent. However, Random Forests is hard to be interpreted and time consuming in learning.  
+Using AUC to evaluate the performance of classification algorithms, we compare the performance of two models. As shown in Figure 3 and Figure 5,  AUC of L2 Penalized Logistic Regression is 92.7%, which outperformed Random Forests by 0.2%. However, we only run the whole analysis process once, this result might not be stable. If time allowed, we would apply resampling approach, such as cross validation, to generate a more stable result.   
+
+
+# Reference
+1. https://www.r-bloggers.com/dealing-with-unbalanced-data-in-machine-learning/
+2. https://rpubs.com/shienlong/wqd7004_RRookie
+3. http://www.sthda.com/english/articles/36-classification-methods-essentials/148-logistic-regression-assumptions-and-diagnostics-in-r/#logistic-regression-assumptions
+4. https://towardsdatascience.com/understanding-auc-roc-curve-68b2303cc9c5
+5. https://www.stat.berkeley.edu/~breiman/randomforest2001.pdf
+6. https://www.alexejgossmann.com/auc/
+7. https://towardsdatascience.com/all-the-annoying-assumptions-31b55df246c3
+8. A data-driven approach to predict the success of bank telemarketing, Sergio Moro, et al.(2014)
+
+# Appendix 1: List of Predictors and Estimated Coefficient
+The table below listed the predictors used in L2 Penalized Logistic Regression, and their estimated coefficient.
+```{r}
+vnames = paste(colnames(bank.f.d[-length(bank.f.d)]),' of record i',sep='')
+vnames = c('(Intercept)',vnames)
+x = paste(rep('X',length(bank.f.d)-1), 1:(length(bank.f.d)-1),sep='_')
+x = paste(x,rep('i',length(bank.f.d)-1),sep = ',')
+x = c('',x)
+exp = data.frame('X_k,i'=x,'Denote'=vnames,'Beta_k'=as.numeric(coef))
+kable(exp,format='latex',digits = 2, longtable = TRUE)
+```
+
+***
+Team ID: Course project group 13
+
+Name (responsibilities): Zheng Gu (Model fitting, Model Diagnostics, Polish Report)
+
+Name (responsibilities): Jieyun Wang (Background, Descriptive Analysis,Polish Report)
+
+Name (responsibilities): Siyao Wang ( Logistic modle,Model Fitting, Polish Report)
+
+Name (responsibilities): Zhi Zhang (Random Forests, Discussion,Polish Report)
+
+Github: https://github.com/ZhengGu0110/STA207Project4-Team13.git
